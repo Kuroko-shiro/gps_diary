@@ -1,0 +1,33 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>位置情報日記アプリ（仮）</title>
+    <link rel="stylesheet" href="diary.css">
+</head>
+<body>
+
+    <div class="container">
+        <h1>位置情報日記</h1>
+        <p>訪れた場所から、一日の終わりに日記を作成しましょう。</p>
+
+        <div class="button-group">
+            <button id="record-btn" class="button-primary">📍 現在地を記録する</button>
+            <button id="create-diary-btn" class="button-secondary">📖 日記を作成する</button>
+        </div>
+
+        <h2>記録した場所</h2>
+        <ul id="locations-list">
+            <li>まだ場所は記録されていません</li>
+        </ul>
+
+        <h2>できあがった日記</h2>
+        <div id="diary-result" class="diary-box">
+            <p>ここに表示</p>
+        </div>
+    </div>
+
+    <script src="diary.js"></script>
+</body>
+</html>
