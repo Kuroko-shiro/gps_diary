@@ -1,5 +1,5 @@
 /**********************************************
- * 位置情報日記 Web クライアント（accuracy無し）
+ * 位置情報日記 Web クライアント（REST API 送信対応・日記一括）
  * - 📍 現在地を記録: localStorage('locations') に追加
  * - 📖 日記を作成: 全件をまとめて API Gateway（REST）へ POST
  *   → S3 保存は Lambda 側で実施
@@ -9,8 +9,8 @@
 // ========== 設定取得 ==========
 function getApiUrl() {
   return (
-    document.querySelector('meta[name="diary-api-url"]')?.content ||
-    document.querySelector('meta[name="api-url"]')?.content ||
+    document.querySelector('meta[name="diary-api-url"]')?.content || // 優先（あれば）
+    document.querySelector('meta[name="api-url"]')?.content ||        // なければ通常API
     window.VITE_API_URL || window.NEXT_PUBLIC_API_URL || ""
   ).trim();
 }
@@ -41,7 +41,7 @@ document.addEventListener("DOMContentLoaded", () => {
 // ========== イベント ==========
 recordBtn?.addEventListener("click", recordCurrentLocation);
 
-// 日記を作成：全件まとめて送信し、成功時クリア
+// ★ 日記を作成：全件まとめて送信し、成功時クリア
 createDiaryBtn?.addEventListener("click", async () => {
   const list = readLocations();
   if (list.length === 0) {
@@ -52,14 +52,15 @@ createDiaryBtn?.addEventListener("click", async () => {
   setStatus("日記をAWSへ送信中…");
 
   try {
-    // accuracy を含めない正規化
+    // 送信前にスキーマを正規化（lat/lon/timestamp ISO/accuracy）
     const normalized = list.map(p => ({
       lat: Number(p.lat ?? p.latitude),
       lon: Number(p.lon ?? p.longitude),
       timestamp:
         typeof p.timestamp === "string" && !/^\d+$/.test(p.timestamp)
           ? new Date(p.timestamp).toISOString()
-          : new Date(Number(p.timestamp ?? Date.now())).toISOString()
+          : new Date(Number(p.timestamp ?? Date.now())).toISOString(),
+      ...(p.accuracy != null ? { accuracy: Number(p.accuracy) } : {})
     }));
 
     const payload = {
@@ -68,11 +69,13 @@ createDiaryBtn?.addEventListener("click", async () => {
       locations: normalized
     };
 
-    await postDiaryToAWS(payload);
+    const resJson = await postDiaryToAWS(payload);
 
-    setStatus("日記の送信に成功しました（S3保存はLambda側）。");
+    // 成功表示
+    const addr = resJson?.address ? `（代表地点: ${escapeHtml(resJson.address)}）` : "";
+    setStatus(`日記の送信に成功しました ${addr}`);
 
-    // 成功したらローカルをクリア
+    // ★ ここでローカルのJSONをクリア
     localStorage.removeItem("locations");
     updateLocationsList();
   } catch (e) {
@@ -94,7 +97,8 @@ function recordCurrentLocation() {
       const point = {
         timestamp: Date.now(), // ms
         latitude: Number(pos.coords.latitude),
-        longitude: Number(pos.coords.longitude)
+        longitude: Number(pos.coords.longitude),
+        accuracy: pos.coords.accuracy != null ? Number(pos.coords.accuracy) : null
       };
       const list = readLocations();
       list.push(point);
@@ -131,16 +135,25 @@ async function postDiaryToAWS(payload) {
   });
 
   let json = null;
-  try { json = await resp.json(); } catch { /* 空ボディ想定 */ }
+  try {
+    json = await resp.json();
+  } catch {
+    json = null;
+  }
 
-  if (!resp.ok) throw new Error(`HTTP ${resp.status}: ${JSON.stringify(json)}`);
+  if (!resp.ok) {
+    throw new Error(`HTTP ${resp.status}: ${JSON.stringify(json)}`);
+  }
   return json;
 }
 
 // ========== ローカル保存ユーティリティ ==========
 function readLocations() {
-  try { return JSON.parse(localStorage.getItem("locations") || "[]"); }
-  catch { return []; }
+  try {
+    return JSON.parse(localStorage.getItem("locations") || "[]");
+  } catch {
+    return [];
+  }
 }
 
 function updateLocationsList() {
@@ -157,10 +170,12 @@ function updateLocationsList() {
         : new Date(Number(loc.timestamp || Date.now()));
     const lat = Number(loc.lat ?? loc.latitude);
     const lon = Number(loc.lon ?? loc.longitude);
+    const acc =
+      loc.accuracy != null ? `（精度: ${Math.round(Number(loc.accuracy))}m）` : "";
     const li = document.createElement("li");
     li.textContent = `${ts.toLocaleString("ja-JP")} - 緯度: ${lat.toFixed(
       5
-    )}, 経度: ${lon.toFixed(5)}`;
+    )}, 経度: ${lon.toFixed(5)}${acc}`;
     locationsList.appendChild(li);
   }
 }
@@ -174,8 +189,11 @@ function ensureDeviceId() {
   }
   return id;
 }
+
 function setStatus(msg) {
-  if (diaryResult) diaryResult.innerHTML = `<p>${escapeHtml(msg)}</p>`;
+  if (diaryResult) {
+    diaryResult.innerHTML = `<p>${escapeHtml(msg)}</p>`;
+  }
 }
 function escapeHtml(s) {
   return String(s).replace(/[&<>"']/g, ch =>
