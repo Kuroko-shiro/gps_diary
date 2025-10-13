@@ -1,143 +1,163 @@
-const recordBtn = document.getElementById('record-btn');
+/**********************************************
+ * 位置情報日記 Web クライアント（REST API 送信対応）
+ * - 「📍現在地を記録する」: localStorage に保存
+ * - 「📖日記を作成する」: 最新 1 件を API Gateway(REST) へ送信
+ * - 送信 JSON: { deviceId, timestamp(ms), latitude, longitude, accuracy }
+ * - API_URL / API_KEY は <meta> から取得（無ければ空）
+ **********************************************/
+
+// ---- 設定の取得（index.html の <meta> から読む） ----
+function getApiUrl() {
+  return (
+    document.querySelector('meta[name="api-url"]')?.content ||
+    window.VITE_API_URL || window.NEXT_PUBLIC_API_URL || ""
+  ).trim();
+}
+function getApiKey() {
+  return (
+    document.querySelector('meta[name="api-key"]')?.content ||
+    window.VITE_API_KEY || window.NEXT_PUBLIC_API_KEY || ""
+  ).trim();
+}
+
+// ---- DOM 参照 ----
+const recordBtn     = document.getElementById('record-btn');
+const createDiaryBtn= document.getElementById('create-diary-btn');
 const locationsList = document.getElementById('locations-list');
+const diaryResult   = document.getElementById('diary-result');
 
-// 保存されているデータを取得して表示
+// ---- 初期化 ----
 document.addEventListener('DOMContentLoaded', () => {
-    updateLocationsList();
+  ensureDeviceId();
+  updateLocationsList();
+
+  if (!getApiUrl()) {
+    setStatus('⚠️ API URL が未設定です。index.html に <meta name="api-url" content="https://.../prod/track"> を追加してください。');
+  }
 });
 
-// 現在地記録ボタンが押された時の処理
-recordBtn.addEventListener('click', () => {
-    // ブラウザが対応していなかったとき
-    if (!navigator.geolocation) {
-        alert('お使いのブラウザは位置情報機能に対応していません。');
-        return;
-    }
-
-    // 位置情報を取得
-    navigator.geolocation.getCurrentPosition(successCallback, errorCallback);
+// ---- イベント ----
+recordBtn?.addEventListener('click', () => recordCurrentLocation());
+createDiaryBtn?.addEventListener('click', async () => {
+  const list = readLocations();
+  if (list.length === 0) {
+    alert('場所が記録されていません。まず「現在地を記録する」を押してください。');
+    return;
+  }
+  const latest = list[list.length - 1];
+  setStatus('AWS に送信中…');
+  try {
+    const res = await postToAWS(latest);
+    const msg = (res && res.address)
+      ? `送信成功（住所: ${escapeHtml(res.address)}）`
+      : '送信成功';
+    setStatus(`${msg} / ${new Date().toLocaleString()}\nlat=${Number(latest.latitude).toFixed(6)}, lon=${Number(latest.longitude).toFixed(6)}`);
+  } catch (e) {
+    console.error(e);
+    setStatus('送信に失敗しました。詳細はコンソールをご確認ください。');
+    alert('送信に失敗しました。API設定・CORS・APIキーを確認してください。');
+  }
 });
 
-// 位置情報取得成功時のコールバック
-function successCallback(position) {
-    const newlocation = {
-        latitude: position.coords.latitude,
-        longitude: position.coords.longitude,
-        timestamp: new Date().toISOString()
-    };
-    saveLocation(newlocation);
+// ---- 機能本体 ----
+function recordCurrentLocation() {
+  if (!navigator.geolocation) {
+    alert('このブラウザは位置情報に対応していません。');
+    return;
+  }
+  setStatus('現在地を取得中…');
+  navigator.geolocation.getCurrentPosition(
+    (pos) => {
+      const point = {
+        // Lambda 側はミリ秒の epoch と緯度経度の数値を期待
+        timestamp: Date.now(),
+        latitude:  Number(pos.coords.latitude),
+        longitude: Number(pos.coords.longitude),
+        accuracy:  pos.coords.accuracy != null ? Number(pos.coords.accuracy) : null
+      };
+      const list = readLocations();
+      list.push(point);
+      localStorage.setItem('locations', JSON.stringify(list));
+      updateLocationsList();
+      setStatus('現在地を保存しました。');
+    },
+    (err) => {
+      const map = {1:'権限が拒否されています',2:'位置を特定できませんでした',3:'タイムアウトしました'};
+      alert(`位置取得に失敗：${map[err.code] || err.message}`);
+      setStatus('位置取得に失敗しました。');
+    },
+    { enableHighAccuracy: true, maximumAge: 0, timeout: 10000 }
+  );
 }
 
-// 位置情報の取得に失敗した時
-function errorCallback(error) {
-    let errorMessage = "位置情報の取得に失敗しました。";
-    switch(error.code) {
-        case 1:
-            errorMessage = "位置情報の利用が許可されていません。ブラウザの設定を確認してください。";
-            break;
-        case 2:
-            errorMessage = "デバイスの位置が特定できませんでした。";
-            break;
-        case 3:
-            errorMessage = "タイムアウトしました。";
-            break;
-    }
-    alert(errorMessage);
-    updateLocationsList();
+async function postToAWS(point) {
+  const API_URL = getApiUrl();
+  if (!API_URL) throw new Error('API_URL 未設定');
+
+  const payload = {
+    deviceId: ensureDeviceId(),
+    timestamp: point.timestamp ?? Date.now(),       // ms
+    latitude:  Number(point.latitude),
+    longitude: Number(point.longitude),
+    accuracy:  point.accuracy != null ? Number(point.accuracy) : null
+  };
+
+  const headers = { 'Content-Type': 'application/json' };
+  const apiKey = getApiKey();
+  if (apiKey) headers['x-api-key'] = apiKey;
+
+  const resp = await fetch(API_URL, {
+    method: 'POST',
+    headers,
+    body: JSON.stringify(payload)
+  });
+
+  // 本番では Lambda が {"ok":true, "address":"..."} などを返す想定
+  let json = null;
+  try { json = await resp.json(); } catch { json = null; }
+
+  if (!resp.ok) throw new Error(`HTTP ${resp.status}: ${JSON.stringify(json)}`);
+  return json;
 }
 
-// 位置情報をブラウザに保存
-function saveLocation(location) {
-    const locations = JSON.parse(localStorage.getItem('locations') || '[]');
-    locations.push(location);
-    localStorage.setItem('locations', JSON.stringify(locations));
-    updateLocationsList();
+// ---- ローカル保存（一覧表示） ----
+function readLocations() {
+  try { return JSON.parse(localStorage.getItem('locations') || '[]'); }
+  catch { return []; }
 }
 
-// 保存されている位置情報をリストに表示
 function updateLocationsList() {
-    const locations = JSON.parse(localStorage.getItem('locations') || '[]');
-    locationsList.innerHTML = '';
-
-    if (locations.length === 0) {
-        locationsList.innerHTML = '<li>まだ場所は記録されていません</li>';
-    }else {
-        locations.forEach(location => {
-            const listItem = document.createElement('li');
-            const date = new Date(location.timestamp).toLocaleTimeString('ja-JP');
-            listItem.textContent = `${date} - 緯度: ${location.latitude.toFixed(5)}, 経度: ${location.longitude.toFixed(5)}`;
-            locationsList.appendChild(listItem);
-        });
-    }
+  const list = readLocations();
+  locationsList.innerHTML = '';
+  if (list.length === 0) {
+    locationsList.innerHTML = '<li>まだ場所は記録されていません</li>';
+    return;
+  }
+  for (const loc of list) {
+    const ts = typeof loc.timestamp === 'string' && !/^\d+$/.test(loc.timestamp)
+      ? new Date(loc.timestamp)
+      : new Date(Number(loc.timestamp || Date.now()));
+    const li = document.createElement('li');
+    li.textContent = `${ts.toLocaleString('ja-JP')} - 緯度: ${Number(loc.latitude).toFixed(5)}, 経度: ${Number(loc.longitude).toFixed(5)}`
+      + (loc.accuracy != null ? `（精度: ${Math.round(Number(loc.accuracy))}m）` : '');
+    locationsList.appendChild(li);
+  }
 }
 
-createDiaryBtn.addEventListener('click', () => {
-    const locations = JSON.parse(localStorage.getItem('locations') || '[]');
+// ---- ユーティリティ ----
+function ensureDeviceId() {
+  let id = localStorage.getItem('deviceId');
+  if (!id) {
+    id = 'web-' + Math.random().toString(36).slice(2, 10);
+    localStorage.setItem('deviceId', id);
+  }
+  return id;
+}
 
-    if (locations.length === 0) {
-        alert('場所が記録されていません。');
-        return;
-    }
-
-    // --- MQTT接続情報 ---
-    // ⚠️これらは後でAWS IoT Coreで取得する情報に書き換えます
-    const brokerHost = 'broker.hivemq.com'; // MQTTブローカーのホスト名（これはテスト用）
-    const brokerPort = 8000;                // WebSocket用のポート番号
-    const clientId = 'diary-app-' + new Date().getTime(); // ユニークなクライアントID
-    const topic = 'diary/locations';        // 送信先のトピック名
-
-    // MQTTクライアントの作成
-    const client = new Paho.MQTT.Client(brokerHost, brokerPort, clientId);
-
-    // 接続成功時の処理
-    client.onConnectionLost = (responseObject) => {
-        if (responseObject.errorCode !== 0) {
-            console.log("onConnectionLost:" + responseObject.errorMessage);
-            alert("ブローカーとの接続が切れました。");
-        }
-    };
-
-    // メッセージ受信時の処理（今回は使わない）
-    client.onMessageArrived = (message) => {
-        console.log("onMessageArrived:" + message.payloadString);
-    };
-
-    // 接続オプション
-    const connectOptions = {
-        onSuccess: onConnect,
-        onFailure: onFailure,
-        useSSL: false // テスト用ブローカーなのでfalse。本番のAWSではtrueにします
-    };
-    
-    // ブローカーへ接続
-    diaryResult.innerHTML = '<p>サーバーに接続中です...</p>';
-    client.connect(connectOptions);
-
-    // 接続に成功したら呼ばれる関数
-    function onConnect() {
-        console.log("MQTTブローカーに接続しました。");
-        diaryResult.innerHTML = '<p>位置情報を送信します...</p>';
-
-        // 送信するメッセージを作成
-        const payload = JSON.stringify(locations);
-        const message = new Paho.MQTT.Message(payload);
-        message.destinationName = topic;
-
-        // メッセージを送信
-        client.send(message);
-
-        console.log("メッセージを送信しました:", payload);
-        diaryResult.innerHTML = '<p>日記の作成をリクエストしました！</p>';
-
-        // 送信が成功したらローカルのデータを削除
-        localStorage.removeItem('locations');
-        updateLocationsList();
-    }
-
-    // 接続に失敗したら呼ばれる関数
-    function onFailure(response) {
-        console.log("接続に失敗しました: " + response.errorMessage);
-        diaryResult.innerHTML = `<p>サーバーへの接続に失敗しました。</p>`;
-        alert("サーバーへの接続に失敗しました。");
-    }
-});
+function setStatus(msg) {
+  if (!diaryResult) return;
+  diaryResult.innerHTML = `<p>${escapeHtml(msg)}</p>`;
+}
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch]));
+}
