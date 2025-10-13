@@ -1,9 +1,9 @@
 /**********************************************
- * 位置情報日記 Web クライアント（REST API 送信対応・日記一括送信版）
+ * 位置情報日記 Web クライアント（REST API 送信対応）
  * - 「📍現在地を記録する」: localStorage に保存
- * - 「📖日記を作成する」: localStorageの全件をJSON化して API へ送信（S3保存はLambda側）
- * - 成功時は localStorage('locations') をクリア
- * - API_URL / DIARY_API_URL / API_KEY は <meta> から取得
+ * - 「📖日記を作成する」: 最新 1 件を API Gateway(REST) へ送信
+ * - 送信 JSON: { deviceId, timestamp(ms), latitude, longitude, accuracy }
+ * - API_URL / API_KEY は <meta> から取得（無ければ空）
  **********************************************/
 
 // ---- 設定の取得（index.html の <meta> から読む） ----
@@ -11,13 +11,6 @@ function getApiUrl() {
   return (
     document.querySelector('meta[name="api-url"]')?.content ||
     window.VITE_API_URL || window.NEXT_PUBLIC_API_URL || ""
-  ).trim();
-}
-// 日記送信用に別エンドポイントを使いたい場合は <meta name="diary-api-url"> を使う
-function getDiaryApiUrl() {
-  return (
-    document.querySelector('meta[name="diary-api-url"]')?.content ||
-    getApiUrl()
   ).trim();
 }
 function getApiKey() {
@@ -28,69 +21,45 @@ function getApiKey() {
 }
 
 // ---- DOM 参照 ----
-const recordBtn      = document.getElementById('record-btn');
-const createDiaryBtn = document.getElementById('create-diary-btn');
-const locationsList  = document.getElementById('locations-list');
-const diaryResult    = document.getElementById('diary-result');
+const recordBtn     = document.getElementById('record-btn');
+const createDiaryBtn= document.getElementById('create-diary-btn');
+const locationsList = document.getElementById('locations-list');
+const diaryResult   = document.getElementById('diary-result');
 
 // ---- 初期化 ----
 document.addEventListener('DOMContentLoaded', () => {
   ensureDeviceId();
   updateLocationsList();
 
-  if (!getDiaryApiUrl()) {
-    setStatus('⚠️ API URL が未設定です。index.html に <meta name="api-url" content="https://.../prod/track"> か、<meta name="diary-api-url"> を設定してください。');
+  if (!getApiUrl()) {
+    setStatus('⚠️ API URL が未設定です。index.html に <meta name="api-url" content="https://.../prod/track"> を追加してください。');
   }
 });
 
 // ---- イベント ----
 recordBtn?.addEventListener('click', () => recordCurrentLocation());
-
-// ★ ここを「最新1件送信」→「全件まとめて日記送信」に変更
 createDiaryBtn?.addEventListener('click', async () => {
   const list = readLocations();
   if (list.length === 0) {
     alert('場所が記録されていません。まず「現在地を記録する」を押してください。');
     return;
   }
-
-  setStatus('日記（全件）をAWSに送信中…');
-
+  const latest = list[list.length - 1];
+  setStatus('AWS に送信中…');
   try {
-    // 送信用に正規化（lat/lon/timestampISO/accuracy）
-    const normalized = list.map(p => ({
-      lat: Number(p.latitude ?? p.lat),
-      lon: Number(p.longitude ?? p.lon),
-      timestamp: typeof p.timestamp === 'string' && !/^\d+$/.test(p.timestamp)
-        ? new Date(p.timestamp).toISOString()
-        : new Date(Number(p.timestamp || Date.now())).toISOString(),
-      ...(p.accuracy != null ? { accuracy: Number(p.accuracy) } : {})
-    }));
-
-    const payload = {
-      deviceId: ensureDeviceId(),
-      diaryCreatedAt: new Date().toISOString(),  // このリクエスト自体の作成時刻
-      locations: normalized                      // 日記本体
-    };
-
-    const resJson = await postDiaryToAWS(payload);
-
-    // 成功表示
-    const addrMsg = (resJson && resJson.address) ? `（代表地点: ${escapeHtml(resJson.address)}）` : '';
-    setStatus(`日記の送信に成功しました${addrMsg}。保存先: S3（Lambda側）`);
-
-    // ★ 成功したらローカルをクリア
-    localStorage.removeItem('locations');
-    updateLocationsList();
-
+    const res = await postToAWS(latest);
+    const msg = (res && res.address)
+      ? `送信成功（住所: ${escapeHtml(res.address)}）`
+      : '送信成功';
+    setStatus(`${msg} / ${new Date().toLocaleString()}\nlat=${Number(latest.latitude).toFixed(6)}, lon=${Number(latest.longitude).toFixed(6)}`);
   } catch (e) {
     console.error(e);
-    setStatus('送信に失敗しました。API設定・CORS・APIキーを確認してください。');
-    alert('サーバーへの送信に失敗しました。');
+    setStatus('送信に失敗しました。詳細はコンソールをご確認ください。');
+    alert('送信に失敗しました。API設定・CORS・APIキーを確認してください。');
   }
 });
 
-// ---- 機能本体（位置記録） ----
+// ---- 機能本体 ----
 function recordCurrentLocation() {
   if (!navigator.geolocation) {
     alert('このブラウザは位置情報に対応していません。');
@@ -100,7 +69,7 @@ function recordCurrentLocation() {
   navigator.geolocation.getCurrentPosition(
     (pos) => {
       const point = {
-        // 既存データとの互換を維持（latitude/longitude/timestamp[ms]）
+        // Lambda 側はミリ秒の epoch と緯度経度の数値を期待
         timestamp: Date.now(),
         latitude:  Number(pos.coords.latitude),
         longitude: Number(pos.coords.longitude),
@@ -121,10 +90,17 @@ function recordCurrentLocation() {
   );
 }
 
-// ---- AWS へ送信（★ 日記用：全件まとめて） ----
-async function postDiaryToAWS(payload) {
-  const API_URL = getDiaryApiUrl();
-  if (!API_URL) throw new Error('DIARY_API_URL 未設定');
+async function postToAWS(point) {
+  const API_URL = getApiUrl();
+  if (!API_URL) throw new Error('API_URL 未設定');
+
+  const payload = {
+    deviceId: ensureDeviceId(),
+    timestamp: point.timestamp ?? Date.now(),       // ms
+    latitude:  Number(point.latitude),
+    longitude: Number(point.longitude),
+    accuracy:  point.accuracy != null ? Number(point.accuracy) : null
+  };
 
   const headers = { 'Content-Type': 'application/json' };
   const apiKey = getApiKey();
@@ -136,12 +112,11 @@ async function postDiaryToAWS(payload) {
     body: JSON.stringify(payload)
   });
 
+  // 本番では Lambda が {"ok":true, "address":"..."} などを返す想定
   let json = null;
   try { json = await resp.json(); } catch { json = null; }
 
-  if (!resp.ok) {
-    throw new Error(`HTTP ${resp.status}: ${JSON.stringify(json)}`);
-  }
+  if (!resp.ok) throw new Error(`HTTP ${resp.status}: ${JSON.stringify(json)}`);
   return json;
 }
 
@@ -163,10 +138,8 @@ function updateLocationsList() {
       ? new Date(loc.timestamp)
       : new Date(Number(loc.timestamp || Date.now()));
     const li = document.createElement('li');
-    const lat = Number(loc.latitude ?? loc.lat);
-    const lon = Number(loc.longitude ?? loc.lon);
-    const acc = (loc.accuracy != null) ? `（精度: ${Math.round(Number(loc.accuracy))}m）` : '';
-    li.textContent = `${ts.toLocaleString('ja-JP')} - 緯度: ${lat.toFixed(5)}, 経度: ${lon.toFixed(5)}${acc}`;
+    li.textContent = `${ts.toLocaleString('ja-JP')} - 緯度: ${Number(loc.latitude).toFixed(5)}, 経度: ${Number(loc.longitude).toFixed(5)}`
+      + (loc.accuracy != null ? `（精度: ${Math.round(Number(loc.accuracy))}m）` : '');
     locationsList.appendChild(li);
   }
 }
