@@ -1,10 +1,10 @@
 /**********************************************
- * 位置情報日記 Web クライアント（REST API 送信対応／accuracy無し）
- * - 📍 現在地を記録: localStorage に保存
- * - 🗑️ 個別削除: リストの「削除」ボタンで1件ずつ消せる
- * - 📖 日記を作成: 保存済みの全ポイント配列を API に送信
- *   送信 JSON: { deviceId, locations:[{lat,lon,timestamp(ms)}...] }
- *   → 成功後に localStorage をリセット（0から再記録）
+ * 位置情報日記 Web クライアント（完全版）
+ * - 📍 現在地を記録: localStorage に {timestamp(ms), latitude, longitude}
+ * - 🗑️ 個別削除: リストの「削除」ボタンで1件ずつ削除
+ * - 📖 日記を作成: 保存済みポイントを 1件ずつ 単発POST
+ *   送信JSON: { deviceId, timestamp(ms), latitude, longitude }
+ *   → 全件成功したら localStorage をクリア（0から再記録）
  * - API_URL / API_KEY は <meta> から取得（無ければ空）
  **********************************************/
 
@@ -52,38 +52,45 @@ recordBtn?.addEventListener('click', recordCurrentLocation);
 
 createDiaryBtn?.addEventListener('click', async () => {
   const list = readLocations();
-  if (list.length === 0) {
+  if (!list.length) {
     alert('場所が記録されていません。まず「現在地を記録する」を押してください。');
     return;
   }
 
-  // 記録“当時”の値をそのまま送る（送信時の再取得はしない）
-  const payload = {
-    deviceId: ensureDeviceId(),
-    locations: list.map(p => ({
-      lat: Number(p.latitude ?? p.lat),
-      lon: Number(p.longitude ?? p.lon),
-      timestamp: Number(p.timestamp) // ms（記録時）
-    }))
-  };
+  // API 仕様に合わせ、保存済みポイントを 1件ずつ 単発POST
+  const deviceId = ensureDeviceId();
+  let ok = 0, fail = 0;
 
-  console.log('POST payload =', payload);
-  setStatus('AWS に送信中…');
+  setStatus(`AWS に送信中… (0/${list.length})`);
+  for (let i = 0; i < list.length; i++) {
+    const p = list[i];
+    const payload = {
+      deviceId,
+      timestamp: Number(p.timestamp),                 // 記録時のミリ秒
+      latitude:  Number(p.latitude ?? p.lat),
+      longitude: Number(p.longitude ?? p.lon)
+    };
+    console.log('POST payload =', payload);
+    try {
+      await postToAWS(payload);
+      ok++;
+    } catch (e) {
+      console.error('post failed', e);
+      fail++;
+    }
+    setStatus(`AWS に送信中… (${i + 1}/${list.length})`);
+  }
 
-  try {
-    const res = await postToAWS(payload);
-    const msg = (res && res.address)
-      ? `送信成功（住所: ${escapeHtml(res.address)}）`
-      : '送信成功';
-    setStatus(`${msg} / ${new Date().toLocaleString()}`);
-
-    // ★ 成功したらローカルをリセット
+  if (ok > 0 && fail === 0) {
+    setStatus(`送信成功（${ok}件） / ${new Date().toLocaleString()}`);
+    // 成功したらローカルをクリア
     localStorage.removeItem('locations');
     updateLocationsList();
-  } catch (e) {
-    console.error(e);
-    setStatus('送信に失敗しました。詳細はコンソールをご確認ください。');
-    alert('送信に失敗しました。API設定・CORS・APIキーを確認してください。');
+  } else if (ok > 0 && fail > 0) {
+    setStatus(`一部成功：成功 ${ok} 件 / 失敗 ${fail} 件。ログを確認してください。`);
+  } else {
+    setStatus('全件失敗しました。CORSやAPIキー、Lambdaエラーを確認してください。');
+    alert('送信に失敗しました。');
   }
 });
 
@@ -94,6 +101,7 @@ function recordCurrentLocation() {
     return;
   }
   setStatus('現在地を取得中…');
+
   navigator.geolocation.getCurrentPosition(
     (pos) => {
       const point = {
@@ -120,7 +128,7 @@ async function postToAWS(payload) {
   const API_URL = getApiUrl();
   if (!API_URL) throw new Error('API_URL 未設定');
 
-  // ヘッダは先に作る（TDZ回避 & 衝突回避）
+  // ヘッダは先に作成（宣言前参照のバグ回避）
   const hdrs = { 'Content-Type': 'application/json' };
   const apiKey = getApiKey();
   if (apiKey) hdrs['x-api-key'] = apiKey;
@@ -131,7 +139,6 @@ async function postToAWS(payload) {
     body: JSON.stringify(payload)
   });
 
-  // 失敗時は本文も拾ってデバッグしやすく
   if (!resp.ok) {
     const text = await resp.text().catch(() => '');
     throw new Error(`HTTP ${resp.status} ${text}`);
@@ -148,7 +155,7 @@ function readLocations() {
 function updateLocationsList() {
   const list = readLocations();
   locationsList.innerHTML = '';
-  if (list.length === 0) {
+  if (!list.length) {
     locationsList.innerHTML = '<li>まだ場所は記録されていません</li>';
     return;
   }
