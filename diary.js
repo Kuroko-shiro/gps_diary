@@ -108,12 +108,17 @@ async function postToAWS(point) {
   const API_URL = getApiUrl();
   if (!API_URL) throw new Error('API_URL 未設定');
 
+  // 送信直前の作り
   const payload = {
     deviceId: ensureDeviceId(),
-    timestamp: point.timestamp ?? Date.now(), // ms
-    latitude:  Number(point.latitude),
-    longitude: Number(point.longitude)
+    locations: readLocations().map(p => ({
+      lat: Number(p.latitude ?? p.lat),
+      lon: Number(p.longitude ?? p.lon),
+      timestamp: Number(p.timestamp) // 記録時のミリ秒
+    }))
   };
+  await fetch(API_URL, { method:'POST', headers, body: JSON.stringify(payload) });
+
 
   const headers = { 'Content-Type': 'application/json' };
   const apiKey = getApiKey();
