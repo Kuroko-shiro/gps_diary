@@ -32,6 +32,7 @@ const diaryResult    = document.getElementById('diary-result');
 document.addEventListener('DOMContentLoaded', () => {
   ensureDeviceId();
   updateLocationsList();
+  diaryResult.innerHTML = '<p>ここに表示</p>';
 
   // 個別削除（イベント委譲）
   locationsList?.addEventListener('click', (e) => {
@@ -82,10 +83,19 @@ createDiaryBtn?.addEventListener('click', async () => {
   }
 
   if (ok > 0 && fail === 0) {
-    setStatus(`送信成功（${ok}件） / ${new Date().toLocaleString()}`);
     // 成功したらローカルをクリア
     localStorage.removeItem('locations');
     updateLocationsList();
+
+    // 日記閲覧ページへのボタンを作成して表示
+    const diaryLinkButton = document.createElement('button');
+    diaryLinkButton.textContent = '日記を閲覧する';
+    diaryLinkButton.className = 'button-primary';
+    diaryLinkButton.style.marginTop = '10px';
+    diaryLinkButton.addEventListener('click', () => {
+        // ★★★ ここに日記閲覧ページのURLを記入してください ★★★
+        window.location.href = './diary-viewer.html'; // 例: './diary-viewer.html'
+    });
   } else if (ok > 0 && fail > 0) {
     setStatus(`一部成功：成功 ${ok} 件 / 失敗 ${fail} 件。ログを確認してください。`);
   } else {
