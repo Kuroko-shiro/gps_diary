@@ -1,5 +1,6 @@
 <!DOCTYPE html>
 <meta name="api-url" content="https://2gcnwgysb9.execute-api.us-east-1.amazonaws.com/prod/track">
+<meta name="viewer-url" content="https://master.d2nuf0z4q3ii04.amplifyapp.com" />
 <meta name="api-key" content="74VGZoDXYH4Zr3cXCOyCs2joiVfNwjxb9cr2tU8z">
 
 <html lang="ja">
@@ -25,10 +26,13 @@
             <li>まだ場所は記録されていません</li>
         </ul>
 
-        <h2>日記の作成</h2>
-        <div id="diary-result" class="diary-box">
-            <p>ここに表示</p>
-        </div>
+        <!-- 例：ボタン群の近くに追記（好きな場所でOK） -->
+        <button id="open-viewer-btn" type="button">📊 可視化ページを開く</button>
+        <!-- 成功時に表示する自動生成リンク（任意） -->
+        <a id="viewer-link" href="#" target="_blank" style="display:none; margin-left:8px;">
+          → この日の可視化を新しいタブで開く
+        </a>
+
     </div>
 
     <script src="diary.js"></script>
