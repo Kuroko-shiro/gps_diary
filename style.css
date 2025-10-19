@@ -97,3 +97,22 @@ button {
     color: #555;
     white-space: pre-wrap; 
 }
+#open-viewer-btn {
+    /* ボタンを中央に配置 */
+    display: block;
+    margin: 20px auto;
+
+    /* サイズ感を他のボタンと合わせるため、幅を内容に合わせる */
+    /* paddingやfont-sizeは既存のbuttonスタイルが適用されます */
+    width: fit-content;
+
+    /* 色の指定（グレー系） */
+    background-color: #95a5a6;
+    color: white;
+}
+
+#open-viewer-btn:hover {
+    /* 他のボタンと同様のホバーエフェクト */
+    background-color: #7f8c8d; /* 少し暗いグレー */
+    transform: translateY(-2px);
+}
